@@ -32,9 +32,8 @@ public class WazirXWebsocketAssignmentApplication implements CommandLineRunner, 
     private final CountDownLatch triggerPriceLatch = new CountDownLatch(1);
 
     private boolean buyOrderProcessed = false;
-
     private boolean sellOrderProcessed = false;
-
+    private volatile boolean exitFlag = false;
 
     @Autowired
     public WazirXWebsocketAssignmentApplication(WazirXApiService wazirXApiService, WazirXwebSocketClient wazirXwebSocketClient) {
@@ -50,7 +49,7 @@ public class WazirXWebsocketAssignmentApplication implements CommandLineRunner, 
     public void run(String... args) throws Exception {
         wazirXwebSocketClient.setListener(this);
 
-        URI serverUri = new URI("wss://stream.wazirx.com/stream"); // Replace with the actual WebSocket URI
+        URI serverUri = new URI("wss://stream.wazirx.com/stream");
 
         ExecutorService executorService = Executors.newFixedThreadPool(2);
 
@@ -68,12 +67,16 @@ public class WazirXWebsocketAssignmentApplication implements CommandLineRunner, 
         executorService.execute(() -> {
             try {
                 triggerPriceLatch.await(); // Wait until the trigger price is set
-                while (true) {
+                while (!exitFlag) {
                     String message = messageQueue.take();
                     processRealTimeData(message);
                 }
             } catch (InterruptedException e) {
-                e.printStackTrace();
+                if (exitFlag) {
+                    System.out.println("Processing thread interrupted due to exit command.");
+                } else {
+                    e.printStackTrace();
+                }
             }
         });
 
@@ -90,15 +93,25 @@ public class WazirXWebsocketAssignmentApplication implements CommandLineRunner, 
         // Wait for user to type 'exit' to terminate the application
         boolean exit = false;
         while (!exit) {
-            //System.out.println("Enter 'exit' to terminate the application.");
             String action = scanner.nextLine().trim().toLowerCase();
             if ("exit".equals(action)) {
                 exit = true;
+                exitFlag = true; // Set the exit flag to stop the processing thread
             } else {
                 System.out.println("Invalid action. Please try again.");
             }
         }
         scanner.close();
+
+        // Close the WebSocket connection
+        try {
+            wazirXwebSocketClient.close();
+            System.out.println("WebSocket connection closed.");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        // Shut down the executor service
         executorService.shutdownNow();
     }
 
@@ -124,21 +137,31 @@ public class WazirXWebsocketAssignmentApplication implements CommandLineRunner, 
                 JsonNode askNode = dataNode.get("a");
                 JsonNode bidNode = dataNode.get("b");
 
-                // Process sell order when ask price exceeds or equals trigger price
-                if (askNode != null && askNode.isArray() && askNode.size() > 0 && askNode.get(0).isArray() && askNode.get(0).size() > 0) {
-                    double askPrice = askNode.get(0).get(0).asDouble();
-                    if (askPrice >= triggerPrice && !sellOrderProcessed) {
-                        wazirXApiService.prepareSellOrder(dataNode);
-                        sellOrderProcessed = true; // Ensure it's only called once
+                // Process sell order when any ask price exceeds or equals trigger price
+                if (askNode != null && askNode.isArray()) {
+                    for (JsonNode askPriceNode : askNode) {
+                        if (askPriceNode.isArray() && askPriceNode.size() > 0) {
+                            double askPrice = askPriceNode.get(0).asDouble();
+                            if (askPrice >= triggerPrice && !sellOrderProcessed) {
+                                wazirXApiService.prepareSellOrder(dataNode);
+                                sellOrderProcessed = true;
+                                break; // Exit the loop once the order is processed
+                            }
+                        }
                     }
                 }
 
-                // Process buy order when bid price falls below or equals trigger price
-                if (bidNode != null && bidNode.isArray() && bidNode.size() > 0 && bidNode.get(0).isArray() && bidNode.get(0).size() > 0) {
-                    double bidPrice = bidNode.get(0).get(0).asDouble();
-                    if (bidPrice <= triggerPrice && !buyOrderProcessed) {
-                        wazirXApiService.prepareBuyOrder(dataNode);
-                        buyOrderProcessed = true; // Ensure it's only called once
+                // Process buy order when any bid price falls below or equals trigger price
+                if (bidNode != null && bidNode.isArray()) {
+                    for (JsonNode bidPriceNode : bidNode) {
+                        if (bidPriceNode.isArray() && bidPriceNode.size() > 0) {
+                            double bidPrice = bidPriceNode.get(0).asDouble();
+                            if (bidPrice <= triggerPrice && !buyOrderProcessed) {
+                                wazirXApiService.prepareBuyOrder(dataNode);
+                                buyOrderProcessed = true;
+                                break; // Exit the loop once the order is processed
+                            }
+                        }
                     }
                 }
             } else {
